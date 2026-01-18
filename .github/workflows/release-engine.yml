@@ -1,0 +1,39 @@
+name: Release engine asset
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux-x64:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build engine (linux-x64)
+        working-directory: policy
+        run: cargo build --release
+
+      - name: Package tarball
+        run: |
+          set -euo pipefail
+          BIN="policy/target/release/apple-policy-lint"
+          test -f "$BIN"
+          chmod +x "$BIN"
+
+          ASSET="apple-policy-lint-linux-x64.tar.gz"
+          mkdir -p dist
+          tar -czf "dist/${ASSET}" -C "policy/target/release" "apple-policy-lint"
+          ls -la dist
+
+      - name: Upload asset to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/apple-policy-lint-linux-x64.tar.gz
