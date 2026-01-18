@@ -1,0 +1,167 @@
+name: Apple Policy Lint (Swift AST)
+description: "AST-based Swift scanner for Apple privacy/compliance signals (fast: downloads prebuilt engine)"
+author: skprasadu
+
+inputs:
+  root:
+    description: "Root directory to scan"
+    required: false
+    default: "."
+
+  comment:
+    description: "Create/update a PR comment"
+    required: false
+    default: "true"
+
+  fail_on_issues:
+    description: "Fail the workflow if issues are found"
+    required: false
+    default: "true"
+
+  report_md:
+    description: "Markdown report output path"
+    required: false
+    default: "out/apple_policy_report.md"
+
+  report_json:
+    description: "JSON report output path"
+    required: false
+    default: "out/apple_policy_report.json"
+
+  github_annotations:
+    description: "Emit GitHub workflow annotations"
+    required: false
+    default: "true"
+
+  # Optional: lets you test a specific engine tag even when using the action locally.
+  engine_version:
+    description: "Engine release tag to download. Use 'auto' to use the action ref (recommended)."
+    required: false
+    default: "auto"
+
+  # Optional: reserved for Pro unlocks later.
+  p2e_token:
+    description: "Optional token for Pro policy packs/features (reserved; engine may ignore today)."
+    required: false
+    default: ""
+
+outputs:
+  count:
+    description: "Number of issues found"
+    value: ${{ steps.lint.outputs.count }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Download Apple Policy Lint engine (prebuilt)
+      id: engine
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        ENGINE_TAG="${{ inputs.engine_version }}"
+        if [ "$ENGINE_TAG" = "auto" ]; then
+          ENGINE_TAG="${{ github.action_ref }}"
+        fi
+
+        if [ -z "$ENGINE_TAG" ]; then
+          echo "ERROR: Could not resolve engine tag."
+          echo "If you are using this action locally (uses: ./), set inputs.engine_version to a release tag like v0.1.0."
+          exit 1
+        fi
+
+        OS="${{ runner.os }}"
+        case "$OS" in
+          Linux) OS="linux" ;;
+          macOS) OS="macos" ;;
+          Windows) OS="windows" ;;
+          *) OS="$(echo "$OS" | tr '[:upper:]' '[:lower:]')" ;;
+        esac
+
+        ARCH="${{ runner.arch }}"
+        case "$ARCH" in
+          X64) ARCH="x64" ;;
+          ARM64) ARCH="arm64" ;;
+          *) ARCH="$(echo "$ARCH" | tr '[:upper:]' '[:lower:]')" ;;
+        esac
+
+        # Enforce linux-x64 for now (publish more assets later if you want)
+        if [ "$OS" != "linux" ] || [ "$ARCH" != "x64" ]; then
+          echo "ERROR: This action currently expects a linux-x64 engine asset."
+          echo "Runner is: OS=$OS ARCH=$ARCH"
+          echo "Fix: run this job on ubuntu-latest, or publish engine assets for this platform."
+          exit 1
+        fi
+
+        ASSET="apple-policy-lint-${OS}-${ARCH}.tar.gz"
+        REPO="${{ github.action_repository }}"
+        URL="https://github.com/${REPO}/releases/download/${ENGINE_TAG}/${ASSET}"
+
+        echo "Downloading engine:"
+        echo "  repo:  $REPO"
+        echo "  tag:   $ENGINE_TAG"
+        echo "  asset: $ASSET"
+
+        mkdir -p .p2i/bin
+        curl -fsSL -o /tmp/apple-policy-lint.tgz "$URL"
+        tar -xzf /tmp/apple-policy-lint.tgz -C .p2i/bin
+
+        # HARD REQUIRE: apple-policy-lint only
+        ENGINE=".p2i/bin/apple-policy-lint"
+        if [ ! -x "$ENGINE" ]; then
+          echo "ERROR: Engine executable not found or not executable: $ENGINE"
+          echo "The release asset must contain an executable named: apple-policy-lint"
+          echo "Extracted files:"
+          ls -la .p2i/bin || true
+          exit 1
+        fi
+
+        chmod +x "$ENGINE" || true
+        echo "engine_path=$ENGINE" >> "$GITHUB_OUTPUT"
+
+    - name: Run policy lint
+      id: lint
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        # If caller provided token as input, export it.
+        # If they set env P2E_TOKEN in workflow, we do NOT overwrite it with empty.
+        if [ -n "${{ inputs.p2e_token }}" ]; then
+          export P2E_TOKEN="${{ inputs.p2e_token }}"
+        fi
+
+        ENGINE="${{ steps.engine.outputs.engine_path }}"
+        echo "Using engine: $ENGINE"
+
+        "$ENGINE" lint \
+          --root "${{ inputs.root }}" \
+          --report "${{ inputs.report_md }}" \
+          --json "${{ inputs.report_json }}" \
+          $([ "${{ inputs.github_annotations }}" = "true" ] && echo "--github-annotations" || true)
+
+        # Parse JSON count (ubuntu-latest has python3)
+        COUNT=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["count"])' "${{ inputs.report_json }}")
+        echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+
+    - name: Find existing bot comment
+      if: ${{ inputs.comment == 'true' && (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') }}
+      uses: peter-evans/find-comment@v4
+      id: fc
+      with:
+        issue-number: ${{ github.event.pull_request.number }}
+        body-includes: "<!-- apple-policy-bot -->"
+
+    - name: Create or update PR comment
+      if: ${{ inputs.comment == 'true' && (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') }}
+      uses: peter-evans/create-or-update-comment@v4
+      with:
+        token: ${{ github.token }}
+        comment-id: ${{ steps.fc.outputs.comment-id }}
+        issue-number: ${{ github.event.pull_request.number }}
+        body-path: ${{ inputs.report_md }}
+
+    - name: Fail if issues found
+      if: ${{ inputs.fail_on_issues == 'true' && steps.lint.outputs.count != '0' }}
+      shell: bash
+      run: exit 1
