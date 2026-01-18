@@ -70,6 +70,14 @@ runs:
           exit 1
         fi
 
+        # Enforce linux-x64 for now (publish more assets later if you want)
+        if [ "$OS" != "linux" ] || [ "$ARCH" != "x64" ]; then
+          echo "ERROR: This action currently expects a linux-x64 engine asset."
+          echo "Runner is: OS=$OS ARCH=$ARCH"
+          echo "Fix: run this job on ubuntu-latest, or publish engine assets for this platform."
+          exit 1
+        fi
+
         ASSET="apple-policy-lint-${OS}-${ARCH}.tar.gz"
 
         # Prefer official env var set by GitHub runner for actions.
