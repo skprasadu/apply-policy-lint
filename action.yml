@@ -59,6 +59,9 @@ runs:
       run: |
         set -euo pipefail
 
+        OS=""
+        ARCH=""
+
         ENGINE_TAG="${{ inputs.engine_version }}"
         if [ "$ENGINE_TAG" = "auto" ]; then
           ENGINE_TAG="${GITHUB_ACTION_REF:-}"
@@ -70,6 +73,21 @@ runs:
           exit 1
         fi
 
+        OS="${{ runner.os }}"
+        case "$OS" in
+          Linux) OS="linux" ;;
+          macOS) OS="macos" ;;
+          Windows) OS="windows" ;;
+          *) OS="$(echo "$OS" | tr '[:upper:]' '[:lower:]')" ;;
+        esac
+
+        ARCH="${{ runner.arch }}"
+        case "$ARCH" in
+          X64) ARCH="x64" ;;
+          ARM64) ARCH="arm64" ;;
+          *) ARCH="$(echo "$ARCH" | tr '[:upper:]' '[:lower:]')" ;;
+        esac
+
         # Enforce linux-x64 for now (publish more assets later if you want)
         if [ "$OS" != "linux" ] || [ "$ARCH" != "x64" ]; then
           echo "ERROR: This action currently expects a linux-x64 engine asset."
@@ -80,10 +98,7 @@ runs:
 
         ASSET="apple-policy-lint-${OS}-${ARCH}.tar.gz"
 
-        # Prefer official env var set by GitHub runner for actions.
         REPO="${GITHUB_ACTION_REPOSITORY:-}"
-
-        # Hard fallback (prevents mysterious blanks)
         if [ -z "$REPO" ]; then
           REPO="skprasadu/apple-policy-lint"
         fi
@@ -99,7 +114,6 @@ runs:
         curl -fsSL -o /tmp/apple-policy-lint.tgz "$URL"
         tar -xzf /tmp/apple-policy-lint.tgz -C .p2i/bin
 
-        # HARD REQUIRE: apple-policy-lint only
         ENGINE=".p2i/bin/apple-policy-lint"
         if [ ! -x "$ENGINE" ]; then
           echo "ERROR: Engine executable not found or not executable: $ENGINE"
@@ -111,7 +125,6 @@ runs:
 
         chmod +x "$ENGINE" || true
         echo "engine_path=$ENGINE" >> "$GITHUB_OUTPUT"
-
     - name: Run policy lint
       id: lint
       shell: bash
