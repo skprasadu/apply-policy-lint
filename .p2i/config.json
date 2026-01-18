@@ -1,0 +1,13 @@
+{
+  "ignore_paths": [
+    ".git",
+    ".github",
+    "Pods",
+    "Carthage",
+    ".build",
+    "build",
+    "DerivedData",
+    "vendor"
+  ],
+  "ignore_rules": []
+}

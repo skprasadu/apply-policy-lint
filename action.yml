@@ -45,6 +45,26 @@ inputs:
     required: false
     default: ""
 
+  scan:
+    description: "Scan mode: full or diff (diff scans only PR-changed Swift files)"
+    required: false
+    default: "full"
+
+  baseline_json:
+    description: "Optional baseline report JSON path. Used with only_new=true."
+    required: false
+    default: ""
+
+  only_new:
+    description: "If true, only report/fail on findings not present in baseline_json."
+    required: false
+    default: "false"
+
+  config_path:
+    description: "Optional config file path (JSON) for ignore rules/paths and future knobs."
+    required: false
+    default: ""
+
 outputs:
   count:
     description: "Number of issues found"
@@ -53,6 +73,60 @@ outputs:
 runs:
   using: "composite"
   steps:
+    - name: Compute changed Swift files (scan=diff)
+      id: diff
+      if: ${{ inputs.scan == 'diff' && github.event_name == 'pull_request' }}
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        REPO: ${{ github.repository }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+      run: |
+        set -euo pipefail
+        mkdir -p .p2i
+
+        python3 - <<'PY'
+        import json, os, urllib.request
+
+        token = os.environ["GH_TOKEN"]
+        repo = os.environ["REPO"]
+        pr = os.environ["PR_NUMBER"]
+
+        out_path = ".p2i/changed_swift_files.txt"
+
+        files = []
+        page = 1
+        while True:
+            url = f"https://api.github.com/repos/{repo}/pulls/{pr}/files?per_page=100&page={page}"
+            req = urllib.request.Request(
+                url,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Accept": "application/vnd.github+json",
+                    "User-Agent": "apple-policy-lint",
+                },
+            )
+            with urllib.request.urlopen(req) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+
+            if not data:
+                break
+
+            for f in data:
+                name = f.get("filename", "")
+                if name.endswith(".swift"):
+                    files.append(name)
+
+            page += 1
+
+        with open(out_path, "w", encoding="utf-8") as fp:
+            fp.write("\n".join(files) + ("\n" if files else ""))
+
+        print(f"Wrote {len(files)} Swift files to {out_path}")
+        PY
+
+        echo "paths_file=.p2i/changed_swift_files.txt" >> "$GITHUB_OUTPUT"
+
     - name: Download Apple Policy Lint engine (prebuilt)
       id: engine
       shell: bash
@@ -140,11 +214,33 @@ runs:
         ENGINE="${{ steps.engine.outputs.engine_path }}"
         echo "Using engine: $ENGINE"
 
+        EXTRA_ARGS=""
+
+        if [ "${{ inputs.scan }}" = "diff" ] && [ "${{ github.event_name }}" = "pull_request" ]; then
+          PF="${{ steps.diff.outputs.paths_file }}"
+          if [ -n "$PF" ] && [ -f "$PF" ]; then
+            EXTRA_ARGS="$EXTRA_ARGS --paths-file $PF"
+          fi
+        fi
+
+        if [ -n "${{ inputs.baseline_json }}" ]; then
+          EXTRA_ARGS="$EXTRA_ARGS --baseline-json ${{ inputs.baseline_json }}"
+        fi
+
+        if [ "${{ inputs.only_new }}" = "true" ]; then
+          EXTRA_ARGS="$EXTRA_ARGS --only-new"
+        fi
+
+        if [ -n "${{ inputs.config_path }}" ]; then
+          EXTRA_ARGS="$EXTRA_ARGS --config ${{ inputs.config_path }}"
+        fi
+
         "$ENGINE" lint \
           --root "${{ inputs.root }}" \
           --report "${{ inputs.report_md }}" \
           --json "${{ inputs.report_json }}" \
-          $([ "${{ inputs.github_annotations }}" = "true" ] && echo "--github-annotations" || true)
+          $([ "${{ inputs.github_annotations }}" = "true" ] && echo "--github-annotations" || true) \
+          $EXTRA_ARGS
 
         # Parse JSON count (ubuntu-latest has python3)
         COUNT=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["count"])' "${{ inputs.report_json }}")

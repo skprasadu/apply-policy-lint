@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tree_sitter::{Node, Parser as TsParser};
@@ -20,14 +21,33 @@ enum Commands {
         #[arg(long, default_value = ".")]
         root: PathBuf,
 
-        #[arg(long, default_value = "out/swift_policy_report.md")]
+        #[arg(long, default_value = "out/apple_policy_report.md")]
         report: PathBuf,
 
-        #[arg(long, default_value = "out/swift_policy_report.json")]
+        #[arg(long, default_value = "out/apple_policy_report.json")]
         json: PathBuf,
 
         #[arg(long)]
         github_annotations: bool,
+
+        /// Optional file containing newline-separated Swift file paths (relative to --root).
+        /// If provided, only these files are scanned.
+        #[arg(long)]
+        paths_file: Option<PathBuf>,
+
+        /// Optional baseline JSON report (same schema as output JSON).
+        /// Used only when --only-new is set.
+        #[arg(long)]
+        baseline_json: Option<PathBuf>,
+
+        /// If set, only report issues that are NOT present in the baseline_json.
+        /// Requires --baseline-json.
+        #[arg(long, default_value_t = false)]
+        only_new: bool,
+
+        /// Optional config JSON file for ignore rules/paths, etc.
+        #[arg(long)]
+        config: Option<PathBuf>,
     },
 }
 
@@ -67,7 +87,7 @@ const RULES: &[Rule] = &[
     },
 ];
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize, Clone)]
 struct Issue {
     file: String,
     line: usize,
@@ -79,10 +99,19 @@ struct Issue {
     snippet: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 struct Report {
     count: usize,
     issues: Vec<Issue>,
+}
+
+#[derive(Deserialize, Default)]
+struct ConfigFile {
+    #[serde(default)]
+    ignore_rules: Vec<String>,
+
+    #[serde(default)]
+    ignore_paths: Vec<String>,
 }
 
 fn main() -> Result<()> {
@@ -94,14 +123,61 @@ fn main() -> Result<()> {
             report,
             json,
             github_annotations,
-        } => run_lint(&root, &report, &json, github_annotations),
+            paths_file,
+            baseline_json,
+            only_new,
+            config,
+        } => run_lint(
+            &root,
+            &report,
+            &json,
+            github_annotations,
+            paths_file.as_deref(),
+            baseline_json.as_deref(),
+            only_new,
+            config.as_deref(),
+        ),
     }
 }
 
-fn run_lint(root: &Path, report_md: &Path, report_json: &Path, github_annotations: bool) -> Result<()> {
+fn run_lint(
+    root: &Path,
+    report_md: &Path,
+    report_json: &Path,
+    github_annotations: bool,
+    paths_file: Option<&Path>,
+    baseline_json: Option<&Path>,
+    only_new: bool,
+    config_path: Option<&Path>,
+) -> Result<()> {
     if !root.exists() {
         anyhow::bail!("--root does not exist: {}", root.display());
     }
+
+    if let Some(pf) = paths_file {
+        if !pf.exists() {
+            anyhow::bail!("--paths-file does not exist: {}", pf.display());
+        }
+    }
+
+    if only_new && baseline_json.is_none() {
+        anyhow::bail!("--only-new requires --baseline-json");
+    }
+    if let Some(b) = baseline_json {
+        if !b.exists() {
+            anyhow::bail!("--baseline-json does not exist: {}", b.display());
+        }
+    }
+
+    let cfg = load_config(config_path)?;
+    let ignore_rule_ids: HashSet<String> = cfg.ignore_rules.into_iter().collect();
+    let ignore_path_prefixes: Vec<String> = cfg
+        .ignore_paths
+        .into_iter()
+        .map(|s| normalize_slashes(&s))
+        .collect();
+
+    let targets = collect_swift_targets(root, paths_file, &ignore_path_prefixes)?;
 
     let mut parser = TsParser::new();
     let language = tree_sitter_swift::LANGUAGE.into();
@@ -111,41 +187,50 @@ fn run_lint(root: &Path, report_md: &Path, report_json: &Path, github_annotation
 
     let mut issues: Vec<Issue> = vec![];
 
-    for entry in WalkDir::new(root).follow_links(true) {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-
-        if !entry.file_type().is_file() {
-            continue;
-        }
-
-        let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("swift") {
-            continue;
-        }
-
-        let src_bytes = match fs::read(path) {
+    for (abs_path, display_path) in targets {
+        let src_bytes = match fs::read(&abs_path) {
             Ok(b) => b,
-            Err(_) => continue,
+            Err(e) => {
+                eprintln!("WARN: failed to read {}: {}", abs_path.display(), e);
+                continue;
+            }
         };
 
         let src_str = match std::str::from_utf8(&src_bytes) {
             Ok(s) => s,
             Err(_) => {
                 // Skip non-UTF8 files explicitly
+                eprintln!("WARN: skipping non-UTF8 file: {}", abs_path.display());
                 continue;
             }
         };
 
         let tree = match parser.parse(src_str, None) {
             Some(t) => t,
-            None => continue,
+            None => {
+                eprintln!("WARN: failed to parse file: {}", abs_path.display());
+                continue;
+            }
         };
 
-        let file_display = path_to_repo_relative(path);
-        scan_tree(tree.root_node(), src_str.as_bytes(), &file_display, &mut issues);
+        scan_tree(
+            tree.root_node(),
+            src_str.as_bytes(),
+            &display_path,
+            &ignore_rule_ids,
+            &mut issues,
+        );
+    }
+
+    // Baseline filtering (only-new)
+    if only_new {
+        if let Some(baseline_path) = baseline_json {
+            let baseline = load_baseline(baseline_path)?;
+            let baseline_set: HashSet<String> =
+                baseline.issues.iter().map(issue_fingerprint).collect();
+
+            issues.retain(|i| !baseline_set.contains(&issue_fingerprint(i)));
+        }
     }
 
     let report = Report {
@@ -170,7 +255,6 @@ fn run_lint(root: &Path, report_md: &Path, report_json: &Path, github_annotation
     // GitHub annotations
     if github_annotations {
         for issue in &report.issues {
-            // Use ::error for PoC so it’s loud
             println!(
                 "::error file={},line={},col={}::{}",
                 issue.file,
@@ -184,13 +268,150 @@ fn run_lint(root: &Path, report_md: &Path, report_json: &Path, github_annotation
     Ok(())
 }
 
-fn scan_tree(node: Node, src: &[u8], file: &str, issues: &mut Vec<Issue>) {
+fn load_config(config_path: Option<&Path>) -> Result<ConfigFile> {
+    let Some(path) = config_path else {
+        return Ok(ConfigFile::default());
+    };
+
+    if !path.exists() {
+        anyhow::bail!("--config does not exist: {}", path.display());
+    }
+
+    let raw = fs::read_to_string(path)
+        .with_context(|| format!("failed reading config: {}", path.display()))?;
+
+    let cfg: ConfigFile = serde_json::from_str(&raw)
+        .with_context(|| format!("failed parsing JSON config: {}", path.display()))?;
+
+    Ok(cfg)
+}
+
+fn load_baseline(path: &Path) -> Result<Report> {
+    let raw = fs::read_to_string(path)
+        .with_context(|| format!("failed reading baseline JSON: {}", path.display()))?;
+
+    let rep: Report = serde_json::from_str(&raw)
+        .with_context(|| format!("failed parsing baseline JSON: {}", path.display()))?;
+
+    Ok(rep)
+}
+
+fn issue_fingerprint(i: &Issue) -> String {
+    // Stable fingerprint (don’t include line/col; those churn).
+    // Enough to suppress “same issue moved” noise.
+    format!("{}|{}|{}", i.rule_id, i.file, i.symbol)
+}
+
+fn collect_swift_targets(
+    root: &Path,
+    paths_file: Option<&Path>,
+    ignore_path_prefixes: &[String],
+) -> Result<Vec<(PathBuf, String)>> {
+    let mut out: Vec<(PathBuf, String)> = vec![];
+
+    if let Some(pf) = paths_file {
+        let raw = fs::read_to_string(pf)
+            .with_context(|| format!("failed reading --paths-file: {}", pf.display()))?;
+
+        for line in raw.lines() {
+            let rel = line.trim();
+            if rel.is_empty() {
+                continue;
+            }
+
+            // Normalize to forward slashes in reports
+            let display = normalize_slashes(rel);
+
+            if !display.ends_with(".swift") {
+                continue;
+            }
+
+            if is_ignored_path(&display, ignore_path_prefixes) {
+                continue;
+            }
+
+            let abs = root.join(rel);
+            if !abs.exists() {
+                // In diff mode a file may be removed; don’t fail the whole run.
+                continue;
+            }
+
+            out.push((abs, display));
+        }
+
+        return Ok(out);
+    }
+
+    // Full scan mode (walk repo)
+    for entry in WalkDir::new(root).follow_links(true) {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+
+        if !entry.file_type().is_file() {
+            continue;
+        }
+
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("swift") {
+            continue;
+        }
+
+        let display = repo_relative(root, path);
+        if is_ignored_path(&display, ignore_path_prefixes) {
+            continue;
+        }
+
+        out.push((path.to_path_buf(), display));
+    }
+
+    Ok(out)
+}
+
+fn repo_relative(root: &Path, path: &Path) -> String {
+    if let Ok(rel) = path.strip_prefix(root) {
+        normalize_slashes(&rel.display().to_string())
+    } else {
+        normalize_slashes(&path.display().to_string())
+    }
+}
+
+fn normalize_slashes(s: &str) -> String {
+    s.replace('\\', "/").trim_start_matches("./").to_string()
+}
+
+fn is_ignored_path(path: &str, ignore_prefixes: &[String]) -> bool {
+    let p = normalize_slashes(path);
+    for raw_prefix in ignore_prefixes {
+        let pref = normalize_slashes(raw_prefix).trim_end_matches('/').to_string();
+        if pref.is_empty() {
+            continue;
+        }
+        if p == pref || p.starts_with(&(pref.clone() + "/")) {
+            return true;
+        }
+    }
+    false
+}
+
+fn scan_tree(
+    node: Node,
+    src: &[u8],
+    file: &str,
+    ignore_rule_ids: &HashSet<String>,
+    issues: &mut Vec<Issue>,
+) {
     // Heuristic: match ANY node type containing "identifier" to avoid depending on exact Swift grammar node names.
     // This still buys us: no false positives from comments/strings.
     let kind_lc = node.kind().to_ascii_lowercase();
     if kind_lc.contains("identifier") {
         if let Ok(text) = node.utf8_text(src) {
             for rule in RULES {
+                if ignore_rule_ids.contains(rule.id) {
+                    continue;
+                }
+
                 if rule.symbols.iter().any(|s| *s == text) {
                     let pos = node.start_position();
                     let line = pos.row + 1;
@@ -214,18 +435,21 @@ fn scan_tree(node: Node, src: &[u8], file: &str, issues: &mut Vec<Issue>) {
 
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        scan_tree(child, src, file, issues);
+        scan_tree(child, src, file, ignore_rule_ids, issues);
     }
 }
 
 fn render_markdown(report: &Report) -> String {
     let mut out = String::new();
-    out.push_str("<!-- swift-policy-bot -->\n");
-    out.push_str("## 🍏 Apple Policy Lint (Swift AST)\n\n");
-    out.push_str(&format!("Found **{}** potential policy-relevant API usages.\n\n", report.count));
+    out.push_str("<!-- apple-policy-bot -->\n");
+    out.push_str("##  Apple Policy Lint (Swift AST)\n\n");
+    out.push_str(&format!(
+        "Found **{}** potential policy-relevant API usages.\n\n",
+        report.count
+    ));
 
     if report.count == 0 {
-        out.push_str("✅ No issues found.\n");
+        out.push_str(" No issues found.\n");
         return out;
     }
 
@@ -280,20 +504,4 @@ fn extract_line(src: &[u8], byte_idx: usize) -> String {
 
 fn escape_workflow_command(s: &str) -> String {
     s.replace('%', "%25").replace('\r', "%0D").replace('\n', "%0A")
-}
-
-fn path_to_repo_relative(path: &Path) -> String {
-    // Best-effort: make paths pretty in GitHub UI
-    // If canonicalize fails, just return the display form.
-    let cwd = std::env::current_dir().ok();
-    if let Some(cwd) = cwd {
-        if let Ok(abs) = path.canonicalize() {
-            if let Ok(cwd_abs) = cwd.canonicalize() {
-                if let Ok(rel) = abs.strip_prefix(&cwd_abs) {
-                    return rel.display().to_string();
-                }
-            }
-        }
-    }
-    path.display().to_string()
 }

@@ -1,0 +1,4 @@
+{
+  "ignore_rules": ["APPLE_REQUIRED_REASON_ACTIVE_KEYBOARDS"],
+  "ignore_paths": ["Tests/", "Examples/"]
+}

@@ -19,9 +19,10 @@ jobs:
 
       - name: Build engine (linux-x64)
         working-directory: policy
-        run: cargo build --release
+        run: cargo build --release --locked
 
       - name: Package tarball
+        shell: bash
         run: |
           set -euo pipefail
           BIN="policy/target/release/apple-policy-lint"

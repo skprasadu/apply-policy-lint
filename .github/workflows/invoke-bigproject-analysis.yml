@@ -1,0 +1,115 @@
+name: E2E - Apple Policy Lint on large repos
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - name: signal-ios
+            repo: signalapp/Signal-iOS
+          - name: firefox-ios
+            repo: mozilla-mobile/firefox-ios
+          - name: wordpress-ios
+            repo: wordpress-mobile/WordPress-iOS
+          - name: duckduckgo-ios
+            repo: duckduckgo/iOS
+
+    steps:
+      - name: Checkout this repo (contains workflow + config)
+        uses: actions/checkout@v4
+
+      - name: Write .p2i/config.json (ignore heavy dirs)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .p2i
+          cat > .p2i/config.json <<'JSON'
+          {
+            "ignore_rules": [],
+            "ignore_paths": [
+              ".git",
+              ".github",
+              "Pods",
+              "Carthage",
+              "vendor",
+              "ThirdParty",
+              ".build",
+              "build",
+              "DerivedData"
+            ]
+          }
+          JSON
+          echo "Wrote .p2i/config.json"
+          cat .p2i/config.json
+
+      - name: Checkout target repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ matrix.repo }}
+          path: target
+          fetch-depth: 1
+
+      - name: Count Swift files (sanity)
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Repo: ${{ matrix.repo }}"
+          echo -n "Swift files: "
+          find target -name '*.swift' | wc -l
+
+      - name: Start timer
+        id: t
+        shell: bash
+        run: echo "start=$(date +%s)" >> "$GITHUB_OUTPUT"
+
+      - name: Run Apple Policy Lint (full scan, no gating)
+        id: apl
+        uses: skprasadu/apple-policy-lint@v0.1.5
+        with:
+          root: target
+          scan: full
+          comment: "false"
+          github_annotations: "false"
+          fail_on_issues: "false"
+          config_path: .p2i/config.json
+          report_md: out/${{ matrix.name }}.md
+          report_json: out/${{ matrix.name }}.json
+
+      - name: Stop timer + summarize
+        shell: bash
+        run: |
+          set -euo pipefail
+          end=$(date +%s)
+          elapsed=$(( end - ${{ steps.t.outputs.start }} ))
+
+          swift_count=$(find target -name '*.swift' | wc -l | tr -d ' ')
+          findings="${{ steps.apl.outputs.count }}"
+
+          echo "Repo: ${{ matrix.repo }}"
+          echo "Swift files: $swift_count"
+          echo "Findings: $findings"
+          echo "Elapsed seconds: $elapsed"
+
+          {
+            echo "## ${{ matrix.name }}"
+            echo ""
+            echo "- Repo: \`${{ matrix.repo }}\`"
+            echo "- Swift files: **$swift_count**"
+            echo "- Findings: **$findings**"
+            echo "- Elapsed: **${elapsed}s**"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports-${{ matrix.name }}
+          path: out/
