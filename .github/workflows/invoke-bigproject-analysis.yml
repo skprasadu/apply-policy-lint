@@ -83,7 +83,7 @@ jobs:
           config_path: .p2i/config.json
           report_md: out/${{ matrix.name }}.md
           report_json: out/${{ matrix.name }}.json
-          engine_version: "v0.1.6"
+          engine_version: "v0.1.7"
 
       - name: Stop timer + summarize
         shell: bash
