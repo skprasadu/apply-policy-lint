@@ -33,13 +33,11 @@ inputs:
     required: false
     default: "true"
 
-  # Optional: lets you test a specific engine tag even when using the action locally.
   engine_version:
     description: "Engine release tag to download. Use 'auto' to use the action ref (recommended)."
     required: false
     default: "auto"
 
-  # Optional: reserved for Pro unlocks later.
   p2e_token:
     description: "Optional token for Pro policy packs/features (reserved; engine may ignore today)."
     required: false
@@ -75,7 +73,7 @@ runs:
   steps:
     - name: Compute changed Swift files (scan=diff)
       id: diff
-      if: ${{ inputs.scan == 'diff' && github.event_name == 'pull_request' }}
+      if: ${{ inputs.scan == 'diff' && (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') }}
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
@@ -133,20 +131,6 @@ runs:
       run: |
         set -euo pipefail
 
-        OS=""
-        ARCH=""
-
-        ENGINE_TAG="${{ inputs.engine_version }}"
-        if [ "$ENGINE_TAG" = "auto" ]; then
-          ENGINE_TAG="${GITHUB_ACTION_REF:-}"
-        fi
-
-        if [ -z "$ENGINE_TAG" ]; then
-          echo "ERROR: Could not resolve engine tag."
-          echo "If you are using this action locally (uses: ./), set inputs.engine_version to a release tag like v0.1.0."
-          exit 1
-        fi
-
         OS="${{ runner.os }}"
         case "$OS" in
           Linux) OS="linux" ;;
@@ -162,7 +146,45 @@ runs:
           *) ARCH="$(echo "$ARCH" | tr '[:upper:]' '[:lower:]')" ;;
         esac
 
-        # Enforce linux-x64 for now (publish more assets later if you want)
+        PARSED_REPO=""
+        PARSED_REF=""
+
+        AP="${GITHUB_ACTION_PATH:-}"
+        if [ -n "$AP" ] && [[ "$AP" == *"/_actions/"* ]]; then
+          tail="${AP##*/_actions/}"
+          owner="${tail%%/*}"
+          tail="${tail#*/}"
+          repo="${tail%%/*}"
+          tail="${tail#*/}"
+          ref="${tail%%/*}"
+
+          if [ -n "$owner" ] && [ -n "$repo" ]; then
+            PARSED_REPO="$owner/$repo"
+          fi
+          if [ -n "$ref" ]; then
+            PARSED_REF="$ref"
+          fi
+        fi
+
+        ENGINE_TAG="${{ inputs.engine_version }}"
+        if [ "$ENGINE_TAG" = "auto" ]; then
+          ENGINE_TAG="${GITHUB_ACTION_REF:-$PARSED_REF}"
+        fi
+
+        ENGINE_TAG="${ENGINE_TAG#refs/tags/}"
+        ENGINE_TAG="${ENGINE_TAG#refs/heads/}"
+
+        if [ -z "$ENGINE_TAG" ]; then
+          echo "ERROR: Could not resolve engine tag."
+          echo "Fix: set inputs.engine_version to a release tag like v0.1.7"
+          exit 1
+        fi
+
+        REPO="${GITHUB_ACTION_REPOSITORY:-$PARSED_REPO}"
+        if [ -z "$REPO" ]; then
+          REPO="skprasadu/apple-policy-lint"
+        fi
+
         if [ "$OS" != "linux" ] || [ "$ARCH" != "x64" ]; then
           echo "ERROR: This action currently expects a linux-x64 engine asset."
           echo "Runner is: OS=$OS ARCH=$ARCH"
@@ -171,12 +193,6 @@ runs:
         fi
 
         ASSET="apple-policy-lint-${OS}-${ARCH}.tar.gz"
-
-        REPO="${GITHUB_ACTION_REPOSITORY:-}"
-        if [ -z "$REPO" ]; then
-          REPO="skprasadu/apple-policy-lint"
-        fi
-
         URL="https://github.com/${REPO}/releases/download/${ENGINE_TAG}/${ASSET}"
 
         echo "Downloading engine:"
@@ -199,14 +215,13 @@ runs:
 
         chmod +x "$ENGINE" || true
         echo "engine_path=$ENGINE" >> "$GITHUB_OUTPUT"
+
     - name: Run policy lint
       id: lint
       shell: bash
       run: |
         set -euo pipefail
 
-        # If caller provided token as input, export it.
-        # If they set env P2E_TOKEN in workflow, we do NOT overwrite it with empty.
         if [ -n "${{ inputs.p2e_token }}" ]; then
           export P2E_TOKEN="${{ inputs.p2e_token }}"
         fi
@@ -216,7 +231,7 @@ runs:
 
         EXTRA_ARGS=""
 
-        if [ "${{ inputs.scan }}" = "diff" ] && [ "${{ github.event_name }}" = "pull_request" ]; then
+        if [ "${{ inputs.scan }}" = "diff" ] && { [ "${{ github.event_name }}" = "pull_request" ] || [ "${{ github.event_name }}" = "pull_request_target" ]; }; then
           PF="${{ steps.diff.outputs.paths_file }}"
           if [ -n "$PF" ] && [ -f "$PF" ]; then
             EXTRA_ARGS="$EXTRA_ARGS --paths-file $PF"
@@ -242,7 +257,6 @@ runs:
           $([ "${{ inputs.github_annotations }}" = "true" ] && echo "--github-annotations" || true) \
           $EXTRA_ARGS
 
-        # Parse JSON count (ubuntu-latest has python3)
         COUNT=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["count"])' "${{ inputs.report_json }}")
         echo "count=$COUNT" >> "$GITHUB_OUTPUT"
 
