@@ -73,7 +73,7 @@ jobs:
 
       - name: Run Apple Policy Lint (full scan, no gating)
         id: apl
-        uses: skprasadu/apple-policy-lint@v0.1.5
+        uses: skprasadu/apple-policy-lint@v0.1.6
         with:
           root: target
           scan: full
