@@ -71,8 +71,9 @@ const RULES: &[Rule] = &[
             "volumeAvailableCapacityForOpportunisticUsageKey",
             "volumeTotalCapacityKey",
             "attributesOfFileSystem",
-            "systemFreeSize",
-            "systemSize",
+            // REMOVE these (too collision-prone):
+            // "systemFreeSize",
+            // "systemSize",
             "statfs",
             "fstatfs",
         ],
