@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "APPLE_REQUIRED_REASON_DISK_SPACE",
+      "category": "Required Reason API: Disk Space",
+      "message": "Potential Disk Space API usage detected. If this is real usage, ensure PrivacyInfo.xcprivacy declares NSPrivacyAccessedAPITypes with an approved reason.",
+      "symbols": [
+        "volumeAvailableCapacityKey",
+        "volumeAvailableCapacityForImportantUsageKey",
+        "volumeAvailableCapacityForOpportunisticUsageKey",
+        "volumeTotalCapacityKey",
+        "attributesOfFileSystem",
+        "statfs",
+        "fstatfs"
+      ]
+    },
+    {
+      "id": "APPLE_REQUIRED_REASON_ACTIVE_KEYBOARDS",
+      "category": "Required Reason API: Active Keyboards",
+      "message": "Potential Active Keyboards API usage detected. If this is real usage, ensure PrivacyInfo.xcprivacy declares NSPrivacyAccessedAPITypes with an approved reason.",
+      "symbols": [
+        "activeInputModes"
+      ]
+    }
+  ]
+}

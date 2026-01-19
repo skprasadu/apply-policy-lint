@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 use tree_sitter::{Node, Parser as TsParser};
 use walkdir::WalkDir;
 
+mod rules;
+
 #[derive(Parser)]
 #[command(author, version, about)]
 struct Cli {
@@ -51,43 +53,6 @@ enum Commands {
     },
 }
 
-#[derive(Clone, Copy)]
-struct Rule {
-    id: &'static str,
-    category: &'static str,
-    message: &'static str,
-    symbols: &'static [&'static str],
-}
-
-// PoC HARD-CODED RULEPACK (replace with JSON policy book later)
-const RULES: &[Rule] = &[
-    Rule {
-        id: "APPLE_REQUIRED_REASON_DISK_SPACE",
-        category: "Required Reason API: Disk Space",
-        message: "Potential Disk Space API usage detected. If this is real usage, ensure PrivacyInfo.xcprivacy declares NSPrivacyAccessedAPITypes with an approved reason.",
-        symbols: &[
-            "volumeAvailableCapacityKey",
-            "volumeAvailableCapacityForImportantUsageKey",
-            "volumeAvailableCapacityForOpportunisticUsageKey",
-            "volumeTotalCapacityKey",
-            "attributesOfFileSystem",
-            // REMOVE these (too collision-prone):
-            // "systemFreeSize",
-            // "systemSize",
-            "statfs",
-            "fstatfs",
-        ],
-    },
-    Rule {
-        id: "APPLE_REQUIRED_REASON_ACTIVE_KEYBOARDS",
-        category: "Required Reason API: Active Keyboards",
-        message: "Potential Active Keyboards API usage detected. If this is real usage, ensure PrivacyInfo.xcprivacy declares NSPrivacyAccessedAPITypes with an approved reason.",
-        symbols: &[
-            "activeInputModes", // UITextInputMode.activeInputModes
-        ],
-    },
-];
-
 #[derive(Serialize, Deserialize, Clone)]
 struct Issue {
     file: String,
@@ -113,6 +78,11 @@ struct ConfigFile {
 
     #[serde(default)]
     ignore_paths: Vec<String>,
+
+    // Optional: override embedded default rules by pointing at a JSON rule pack.
+    // Example: "rules_path": "rules.json" (resolved relative to config.json dir)
+    #[serde(default)]
+    rules_path: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -171,6 +141,11 @@ fn run_lint(
     }
 
     let cfg = load_config(config_path)?;
+
+    // Load rules (embedded defaults unless overridden via config.rules_path)
+    let rules_vec = rules::load_rules(root, config_path, cfg.rules_path.as_deref())?;
+    let symbol_index = rules::build_symbol_index(&rules_vec);
+
     let ignore_rule_ids: HashSet<String> = cfg.ignore_rules.into_iter().collect();
     let ignore_path_prefixes: Vec<String> = cfg
         .ignore_paths
@@ -219,6 +194,8 @@ fn run_lint(
             src_str.as_bytes(),
             &display_path,
             &ignore_rule_ids,
+            &rules_vec,
+            &symbol_index,
             &mut issues,
         );
     }
@@ -431,6 +408,8 @@ fn scan_tree(
     src: &[u8],
     file: &str,
     ignore_rule_ids: &HashSet<String>,
+    rules_vec: &[rules::Rule],
+    symbol_index: &rules::SymbolIndex,
     issues: &mut Vec<Issue>,
 ) {
     // Heuristic: match ANY node type containing "identifier" to avoid depending on exact Swift grammar node names.
@@ -438,12 +417,14 @@ fn scan_tree(
     let kind_lc = node.kind().to_ascii_lowercase();
     if kind_lc.contains("identifier") {
         if let Ok(text) = node.utf8_text(src) {
-            for rule in RULES {
-                if ignore_rule_ids.contains(rule.id) {
-                    continue;
-                }
+            if let Some(rule_idxs) = symbol_index.get(text) {
+                for &idx in rule_idxs {
+                    let rule = &rules_vec[idx];
 
-                if rule.symbols.iter().any(|s| *s == text) {
+                    if ignore_rule_ids.contains(&rule.id) {
+                        continue;
+                    }
+
                     let pos = node.start_position();
                     let line = pos.row + 1;
                     let col = pos.column + 1;
@@ -453,8 +434,8 @@ fn scan_tree(
                         file: file.to_string(),
                         line,
                         column: col,
-                        rule_id: rule.id.to_string(),
-                        category: rule.category.to_string(),
+                        rule_id: rule.id.clone(),
+                        category: rule.category.clone(),
                         symbol: text.to_string(),
                         message: format!("{} (symbol: `{}`)", rule.message, text),
                         snippet,
@@ -466,7 +447,15 @@ fn scan_tree(
 
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        scan_tree(child, src, file, ignore_rule_ids, issues);
+        scan_tree(
+            child,
+            src,
+            file,
+            ignore_rule_ids,
+            rules_vec,
+            symbol_index,
+            issues,
+        );
     }
 }
 
