@@ -473,7 +473,7 @@ fn scan_tree(
 fn render_markdown(report: &Report) -> String {
     let mut out = String::new();
     out.push_str("<!-- apple-policy-bot -->\n");
-    out.push_str("##🍏 Apple Policy Lint (Swift AST)\n\n");
+    out.push_str("## 🍏 Apple Policy Lint (Swift AST)\n\n");
     if report.count == 0 {
         out.push_str("No policy-relevant API usage detected.\n\n");
     } else {
