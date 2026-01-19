@@ -1,0 +1,95 @@
+name: Apple Policy Lint (Swift)
+
+on:
+  pull_request:
+    paths:
+      - "**/*.swift"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  policy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Preflight (baseline + config)
+        id: preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # One clean error line + one clean summary message.
+          if [ ! -f .p2i/config.json ]; then
+            msg="Missing .p2i/config.json. Add it and re-run."
+          elif [ ! -f .p2i/baseline.json ]; then
+            msg="Missing .p2i/baseline.json. Run Actions → 'Apple Policy Lint - Update baseline' and merge the baseline PR."
+          else
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "ok=false" >> "$GITHUB_OUTPUT"
+          echo "::error title=Apple Policy Lint setup required::$msg"
+
+          {
+            echo "## Apple Policy Lint"
+            echo ""
+            echo "❌ $msg"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fail fast if preflight failed
+        if: steps.preflight.outputs.ok != 'true'
+        shell: bash
+        run: exit 1
+
+      - name: Start timer
+        if: steps.preflight.outputs.ok == 'true'
+        shell: bash
+        run: echo "START_TS=$(date +%s)" >> "$GITHUB_ENV"
+
+      - name: Run Apple Policy Lint (diff, only new)
+        if: steps.preflight.outputs.ok == 'true'
+        id: apl
+        uses: skprasadu/apple-policy-lint@v0.2.2
+        with:
+          root: .
+          scan: diff
+          config_path: .p2i/config.json
+          baseline_json: .p2i/baseline.json
+          only_new: "true"
+
+          comment: "true"
+          github_annotations: "true"
+          fail_on_issues: "true"
+
+          report_md: out/apple_policy_report.md
+          report_json: out/apple_policy_report.json
+
+      - name: Stop timer + summarize
+        if: always() && steps.preflight.outputs.ok == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          end=$(date +%s)
+          elapsed=$(( end - START_TS ))
+          findings="${{ steps.apl.outputs.count }}"
+
+          {
+            echo "## Apple Policy Lint"
+            echo ""
+            echo "- Mode: **diff**"
+            echo "- Only new: **true**"
+            echo "- Findings (new): **${findings:-unknown}**"
+            echo "- Elapsed: **${elapsed}s**"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload reports (debuggable even if action fails)
+        if: always() && steps.preflight.outputs.ok == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: apple-policy-lint-reports
+          path: out/
