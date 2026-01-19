@@ -234,6 +234,9 @@ fn run_lint(
         }
     }
 
+    // NEW: stable + set semantics
+    sort_and_dedupe_issues(&mut issues);
+
     let report = Report {
         count: issues.len(),
         issues,
@@ -309,7 +312,17 @@ fn collect_swift_targets(
     ignore_path_prefixes: &[String],
 ) -> Result<Vec<(PathBuf, String)>> {
     let mut out: Vec<(PathBuf, String)> = vec![];
+    let mut seen: HashSet<PathBuf> = HashSet::new();
 
+    // Helper: only include a file once (canonical path identity).
+    let mut push_unique = |abs: PathBuf, display: String| {
+        let canon = fs::canonicalize(&abs).unwrap_or_else(|_| abs.clone());
+        if seen.insert(canon) {
+            out.push((abs, display));
+        }
+    };
+
+    // --- Diff mode: use the provided paths list ---
     if let Some(pf) = paths_file {
         let raw = fs::read_to_string(pf)
             .with_context(|| format!("failed reading --paths-file: {}", pf.display()))?;
@@ -320,7 +333,6 @@ fn collect_swift_targets(
                 continue;
             }
 
-            // Normalize to forward slashes in reports
             let display = normalize_slashes(rel);
 
             if !display.ends_with(".swift") {
@@ -333,18 +345,32 @@ fn collect_swift_targets(
 
             let abs = root.join(rel);
             if !abs.exists() {
-                // In diff mode a file may be removed; don’t fail the whole run.
+                // In diff mode, a file can be deleted/renamed; don't fail the run.
                 continue;
             }
 
-            out.push((abs, display));
+            push_unique(abs, display);
         }
 
+        // Stable ordering => stable reports
+        out.sort_by(|a, b| a.1.cmp(&b.1));
         return Ok(out);
     }
 
-    // Full scan mode (walk repo)
-    for entry in WalkDir::new(root).follow_links(true) {
+    // --- Full scan mode: walk repo, but PRUNE ignored dirs early ---
+    let walker = WalkDir::new(root)
+        .follow_links(false) // safer default; avoids wandering outside repo
+        .into_iter()
+        .filter_entry(|e| {
+            // Always keep the root itself
+            if e.depth() == 0 {
+                return true;
+            }
+            let rel = repo_relative(root, e.path());
+            !is_ignored_path(&rel, ignore_path_prefixes)
+        });
+
+    for entry in walker {
         let entry = match entry {
             Ok(e) => e,
             Err(_) => continue,
@@ -360,13 +386,15 @@ fn collect_swift_targets(
         }
 
         let display = repo_relative(root, path);
+        // We already prune dirs, but keep this for safety on files:
         if is_ignored_path(&display, ignore_path_prefixes) {
             continue;
         }
 
-        out.push((path.to_path_buf(), display));
+        push_unique(path.to_path_buf(), display);
     }
 
+    out.sort_by(|a, b| a.1.cmp(&b.1));
     Ok(out)
 }
 
@@ -385,7 +413,9 @@ fn normalize_slashes(s: &str) -> String {
 fn is_ignored_path(path: &str, ignore_prefixes: &[String]) -> bool {
     let p = normalize_slashes(path);
     for raw_prefix in ignore_prefixes {
-        let pref = normalize_slashes(raw_prefix).trim_end_matches('/').to_string();
+        let pref = normalize_slashes(raw_prefix)
+            .trim_end_matches('/')
+            .to_string();
         if pref.is_empty() {
             continue;
         }
@@ -444,14 +474,13 @@ fn render_markdown(report: &Report) -> String {
     let mut out = String::new();
     out.push_str("<!-- apple-policy-bot -->\n");
     out.push_str("##  Apple Policy Lint (Swift AST)\n\n");
-    out.push_str(&format!(
-        "Found **{}** potential policy-relevant API usages.\n\n",
-        report.count
-    ));
-
     if report.count == 0 {
-        out.push_str(" No issues found.\n");
-        return out;
+        out.push_str("🍏 **Green Apple:** No policy-relevant API usage detected.\n\n");
+    } else {
+        out.push_str(&format!(
+            "🍎 **Findings:** Found **{}** potential policy-relevant API usages.\n\n",
+            report.count
+        ));
     }
 
     out.push_str("| Category | Symbol | File | Line | Rule |\n");
@@ -504,5 +533,21 @@ fn extract_line(src: &[u8], byte_idx: usize) -> String {
 }
 
 fn escape_workflow_command(s: &str) -> String {
-    s.replace('%', "%25").replace('\r', "%0D").replace('\n', "%0A")
+    s.replace('%', "%25")
+        .replace('\r', "%0D")
+        .replace('\n', "%0A")
+}
+
+fn sort_and_dedupe_issues(issues: &mut Vec<Issue>) {
+    issues.sort_by(|a, b| {
+        a.file
+            .cmp(&b.file)
+            .then(a.rule_id.cmp(&b.rule_id))
+            .then(a.symbol.cmp(&b.symbol))
+            .then(a.line.cmp(&b.line))
+            .then(a.column.cmp(&b.column))
+    });
+
+    let mut seen: HashSet<String> = HashSet::new();
+    issues.retain(|i| seen.insert(issue_fingerprint(i)));
 }
