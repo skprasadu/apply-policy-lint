@@ -1,81 +1,74 @@
 # Apple Policy Lint (Swift AST)
-Policy-sensitive API checks in pull requests (before App Store review).
 
-Apple Policy Lint is a GitHub Action that scans Swift code using a real AST (tree-sitter),
-detects Apple policy-sensitive APIs (example: Required Reason APIs), and posts a clean PR report
-with file/line/rule + remediation guidance.
+**Deterministic policy enforcement via GitHub Actions for modern codebases.**
 
-**Goal:** catch policy mistakes early when fixes are cheap.
+Apple Policy Lint scans Swift code using a real AST (tree-sitter) and detects Apple policy-sensitive APIs
+(e.g., Required Reason APIs). It posts a clean PR report (file/line/rule + remediation guidance) and can gate merges.
 
 > Not affiliated with Apple.
 
 ---
 
-## Why this exists
-Teams usually discover Apple privacy/policy issues:
-- late (right before submission),
-- inconsistently (tribal knowledge + checklists),
-- and expensively (review churn, release delays).
-
-This action makes policy checks:
-- deterministic
-- versioned
-- and reviewable in PRs
-
-Think "policy-as-code", not "wiki-as-policy".
-
----
-
 ## What you get
-- ✅ AST-based scanning (no regex)
-- ✅ PR comment report (clean, readable)
-- ✅ Optional GitHub annotations (`::error file=...`)
-- ✅ Optional merge gate (fail workflow when issues exist)
-- ✅ JSON output for downstream automation
+- AST-based scanning (not regex)
+- PR comment report (readable + reviewable)
+- Optional GitHub annotations (`::error file=...`)
+- Optional merge gate (fail workflow when issues exist)
+- Baseline support: fail only on **new** findings
 
 ---
 
-## Example PR report
+## Quickstart (recommended onboarding)
 
-<!-- swift-policy-bot -->
-## Apple Policy Lint (Swift AST)
-
-Found **1** potential policy-relevant API usages.
-
-| Category | Symbol | File | Line | Rule |
-|---|---|---|---:|---|
-| Required Reason API: Active Keyboards | `activeInputModes` | `TestPipeline/PolicyTrigger.swift` | 5 | `APPLE_REQUIRED_REASON_ACTIVE_KEYBOARDS` |
-
-### Details
-- **activeInputModes** in `TestPipeline/PolicyTrigger.swift`:5:25  
-  Rule: `APPLE_REQUIRED_REASON_ACTIVE_KEYBOARDS`  
-  Potential Active Keyboards API usage detected. If this is real usage, ensure `PrivacyInfo.xcprivacy`
-  declares `NSPrivacyAccessedAPITypes` with an approved reason. (symbol: `activeInputModes`)
+### Step 0 — Enable workflow permissions (required for baseline PR)
+Repo → **Settings → Actions → General**
+- Workflow permissions: **Read and write**
+- Enable: **Allow GitHub Actions to create and approve pull requests**
 
 ---
 
-## Quickstart (GitHub Action)
+### Step 1 — Add config file
+Create `.p2i/config.json`:
 
-### 1) Add to your workflow
-Create `.github/workflows/apple-policy-lint.yml`:
+```json
+{
+  "ignore_paths": [".git",".github","Pods","Carthage",".build","build","DerivedData","vendor"],
+  "ignore_rules": []
+}
+```
 
-```yaml
-name: Apple Policy Lint
+### Step 2 — Create baseline workflow
 
-on:
-  pull_request:
-    branches: [ main ]
+Add .github/workflows/apple-policy-baseline.yml (baseline PR will be created):
+- Runs full scan
+- Writes .p2i/baseline.json
+- Opens PR: chore(policy): update apple-policy-lint baseline
 
-jobs:
-  lint:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
+(Use the onboarding pack from p2i.ai docs / customer pack repo.)
 
-      # If action.yml is at repo root:
-      - uses: skprasadu/apple-policy-lint@v0.1.0
-        with:
-          root: "."
-          comment: "true"
-          fail_on_issues: "true"
-          github_annotations: "true"
+Run it once from Actions → workflow_dispatch → merge baseline PR.
+
+### Step 3 — Add PR lint workflow
+
+Add .github/workflows/apple-policy-lint.yml:
+- Runs on PRs
+- Scans only changed Swift files (diff mode)
+- Fails only on findings not present in baseline
+
+### Inputs
+
+Key inputs most teams use:
+- scan: full or diff
+- config_path: .p2i/config.json
+- baseline_json: .p2i/baseline.json
+- only_new: "true" (recommended)
+- fail_on_issues: "true" (recommended)
+
+### Outputs
+- count: number of findings
+
+
+### Docs / onboarding
+
+Full onboarding docs: https://p2i.ai (Apple Policy Lint section)
+

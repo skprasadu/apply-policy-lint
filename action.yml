@@ -2,6 +2,10 @@ name: Apple Policy Lint (Swift AST)
 description: "AST-based Swift scanner for Apple privacy/compliance signals (fast: downloads prebuilt engine)"
 author: skprasadu
 
+branding:
+  icon: "shield"
+  color: "green"
+
 inputs:
   root:
     description: "Root directory to scan"
